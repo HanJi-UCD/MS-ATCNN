@@ -3,8 +3,8 @@
 
 cff-version: 1.2.0
 title: >-
-  Mobility-Supporting Network Management for A-TCNN in Hybrid LiFi and WiFi Networks
-message: ATCNN
+  Resource and Mobility Management in Hybrid LiFi and WiFi Networks: A User-centric Learning Approach
+message: MS-ATCNN
 type: dataset
 authors:
   - given-names: Han

@@ -1,0 +1,17 @@
+Metadata-Version: 2.1
+Name: pymobility
+Version: 0.1.0
+Summary: Mobility models for Python
+Home-page: http://github.com/panisson/pymobility
+Author: André Panisson
+Author-email: panisson@gmail.com
+License: GPL
+Keywords: mobility models
+Classifier: License :: OSI-Approved Open Source :: GNU General Public License version 2.0 (GPLv2)
+Classifier: Programming Language :: Python
+Classifier: Operating System :: OS Independent
+Classifier: Environment :: Console
+Classifier: User Interface :: Textual :: Command-lineTopic :: Scientific/Engineering :: Simulations
+Classifier: Topic :: Scientific/Engineering :: Information Analysis
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research

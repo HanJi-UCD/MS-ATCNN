@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-import copy
 from copy import deepcopy
 
 # case of 4 LiFi size
@@ -134,21 +133,17 @@ class ATCNN_16LiFi_100UE(nn.Module):
         x = self.combiner(x)
         return x    
     
-class UTI_prediction(nn.Module):
-    def __init__(self, net='resnet18', input_dim = 4, output_dim = 1):
+class MSNN(nn.Module):
+    def __init__(self, net='resnet18', input_dim = 3, output_dim = 1):
         super().__init__()
         
-        self.NN = nn.Sequential(nn.Linear(4, 8, bias=True), #1
-                                        nn.BatchNorm1d(8),
+        self.NN = nn.Sequential(nn.Linear(3, 16, bias=True), #1
+                                        nn.BatchNorm1d(16),
                                         nn.ReLU(inplace=True), # first layer
                                         
-                                        nn.Linear(8, 4, bias=True),
+                                        nn.Linear(16, 4, bias=True),
                                         nn.BatchNorm1d(4),
                                         nn.ReLU(inplace=True), # third layer
-                                        
-                                        # nn.Linear(4, 2, bias=True),
-                                        # nn.BatchNorm1d(2),
-                                        # nn.ReLU(inplace=True), # third layer
                                         
                                         nn.Linear(4, output_dim, bias=True),
                                         nn.BatchNorm1d(output_dim),
@@ -158,6 +153,22 @@ class UTI_prediction(nn.Module):
     def forward(self, ipt):
         x = self.NN(ipt)
         return x
+    
+#  RNN model
+class RNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers, dropout = 0.0):
+        super(RNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers=num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+        self.Sigmoid = nn.Sigmoid()
+
+    def forward(self, x, h0):
+        out, hn = self.rnn(x, h0)
+        out = self.fc(out[:, -1, :])
+        out = self.Sigmoid(out)
+        return out, hn
+    
 
 class global_dnn(nn.Module):
     """

@@ -8,17 +8,18 @@ Created on Fri Dec 16 02:28:06 2022
 
 import numpy as np
 import torch
-from ATCNN_model import normalization, to_binary, switch, translate, mapping
+from ATCNN_model import normalization, to_binary, switch, translate, mapping, MSNN
 import math
 import pandas as pd
 from numpy.polynomial import Polynomial as P
-from pymobility.models.mobility import random_walk
+from pymobility.models.mobility import random_walk, random_waypoint, gauss_markov
 import random
 import time
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-import tensorflow as tf
-import imageio
+# import tensorflow as tf # this line causes error in my Macbook laptop, while work in Windows PC
+# import imageio
+from sklearn.linear_model import LinearRegression
 
 
 REMOTE_CONTROLLER_IP = '127.0.0.1'
@@ -75,7 +76,7 @@ class Net():
             SNR_matrix.append(snr_list) 
             Capacity.append(Capacity_vector)
         self.SNR_matrix = SNR_matrix
-        self.Capacity = Capacity        
+        self.Capacity = Capacity
     
     def load_balancing(self, Trained_Net, M):
         # load ATCNN model, correct now
@@ -92,9 +93,9 @@ class Net():
         condition = np.reshape(target_list, ((self.AP_num+1)*self.UE_num, 1)).tolist()
         condition = sum(condition, []) # flatten the list
         predicted_output = []
+        raw_condition = torch.tensor(condition)
         tic = time.time()
         for i in range(self.UE_num):
-            raw_condition = torch.tensor(condition)
             condition_now = switch(raw_condition, i, self.AP_num+1) 
             condition_now = torch.tensor([condition_now])
             mirroring_condition = mapping(M-1, [self.UE_num], condition_now.tolist(), self.AP_num)
@@ -273,7 +274,7 @@ def object_function(X, Capacity, R_required):
     return cost
 
 # for calculate average throughput using dynamic UTI and delay
-def start_simualtion(net, eng, Trained_Net, M, opt_mode, UTI_mode, LB_mode, Thr_mode, runtime_mode=None):
+def start_simualtion(net, Trained_Net, M, opt_mode, UTI_mode, LB_mode, Thr_mode, runtime_mode=None, RNN_mode=None):
     ###### Ideal Benchmark with 10ms UTI ###############################
     # Thr_mode: Target or Average
     # update env setup for HLWNets
@@ -292,17 +293,27 @@ def start_simualtion(net, eng, Trained_Net, M, opt_mode, UTI_mode, LB_mode, Thr_
             0.120,0.124,0.129,0.145,0.161,0.164,0.179,0.185,0.188,0.208,0.212,0.231,0.226,0.253,0.321,0.289,0.285,0.329,0.361,0.352,0.451,
             0.473,0.419,0.518,0.489,0.463,0.473,0.475,0.550,0.560,0.636,0.654,0.601,0.636,0.681,0.709,0.636,0.672,0.728,0.760,0.730,0.761,0.766,0.927,0.901,1.01,
             1.098,0.928,1.068,1.015,1.129,1.146,1.242,1.072,1.183,1.121,1.290,1.397,1.387,1.420,1.456,1.470,1.386,1.412,1.583,1.638,1.578,1.600,1.751,1.844,1.958] 
-        runtime_GT = runtime_GT_list[net.UE_num-10] # 
-    
-    tf.keras.utils.disable_interactive_logging()
-    # load trained UTI models in advance
-    net.loaded_model_Type4 = tf.keras.models.load_model('trained_model/NN_UTI_100UE_new_Type4.h5')
-    net.loaded_model_Type1 = tf.keras.models.load_model('trained_model/NN_UTI_100UE_new_Type1.h5')
-    net.loaded_model_Type3 = tf.keras.models.load_model('trained_model/NN_UTI_100UE_new_Type3.h5')
-    net.loaded_model_Type2 = tf.keras.models.load_model('trained_model/NN_UTI_100UE_new_Type2.h5')
+        runtime_GT = runtime_GT_list[net.UE_num-10] 
     
     UTI_update_instances = []
     LB_update_instances = []
+    ############ record historical data for RNN ############
+    if RNN_mode != None:
+        h0 = torch.zeros(3, 1, 32).to(torch.device('cpu'))
+        RNN_trace = torch.zeros(net.UE_num, net.waypoints_num-1, 3)
+        for n in range(net.waypoints_num-1):
+            net.mobility_trigger(n, net.X_list_new, net.Y_list_new, net.Saved_SNR_list)
+            net.load_balancing(Trained_Net, M)
+            for i in range(net.UE_num):
+                RNN_trace[i, n, 0] = net.SNR_matrix[i][net.X_iu[i] - 1]
+                tar_position = net.recorded_trace[n][i]
+                tar_position_new = net.recorded_trace[n+1][i]
+                AP_position = net.AP_position[net.X_iu[i] - 1] ## 2-D distance
+                v1 = [(tar_position_new[0]-tar_position[0]), (tar_position_new[1]-tar_position[1])]
+                v2 = [(AP_position[0]-tar_position[0]), (AP_position[1]-tar_position[1])]
+                RNN_trace[i, n, 1] = angle2(v1, v2)
+                RNN_trace[i, n, 2] = distance(tar_position, tar_position_new)*100
+                
     for n in range(net.waypoints_num-1):
         # mobility model
         net.mobility_trigger(n, net.X_list_new, net.Y_list_new, net.Saved_SNR_list) # update SNRs and Capacity  
@@ -332,14 +343,18 @@ def start_simualtion(net, eng, Trained_Net, M, opt_mode, UTI_mode, LB_mode, Thr_
                     UTI_thr_now = sum(UTI_thr_now)/len(UTI_thr_now)
                         
         ################# done, for average throughput for MS-ATCNN ####################
-        elif UTI_mode == 'Dynamic':      
+        elif UTI_mode == 'Dynamic':
             if n == 0:
                 net.load_balancing(Trained_Net, M)
                 X_iu_old = net.X_iu # initial result, first update at t0
                 sum_UTI = [0]*net.UE_num # sum_UTI is the time axis
                 Delta_time_list = []
                 for i in range(net.UE_num):
-                    UTI = call_function(net, n, X_iu_old, i) # get UTIs for all UEs at t0
+                    if RNN_mode != None:
+                        UTI, h0 = call_function_RNN(net, n, X_iu_old, i, h0, RNN_trace)
+                    else:
+                        UTI = call_function(net, n, X_iu_old, i) # get UTIs for all UEs at t0
+                    # UTI = call_function_LR(net, n, X_iu_old, i) 
                     Delta_time_list.append(int(UTI/0.01))
                 delay = runtime_ATCNN + runtime_UTI # runtime time to delay
                 delay_time = int(delay/0.01)  
@@ -349,7 +364,11 @@ def start_simualtion(net, eng, Trained_Net, M, opt_mode, UTI_mode, LB_mode, Thr_
                 Delta_time = Delta_time_list[j] # UTI time for j-th UE
                 if n == (sum_UTI[j] + Delta_time): # predict new UTI for j-th UE
                     sum_UTI[j] = sum_UTI[j] + Delta_time
-                    UTI = call_function(net, n, X_iu_old, j)
+                    if RNN_mode != None:
+                        UTI, h0 = call_function_RNN(net, n, X_iu_old, i, h0, RNN_trace)
+                    else:
+                        UTI = call_function(net, n, X_iu_old, i) # get UTIs for all UEs at t0
+                    # UTI = call_function_LR(net, n, X_iu_old, i) 
                     Delta_time_list[j] = int(UTI/0.01) # update UTI for j-th UE
                     if j == 0: # only record for target UE to plot
                         UTI_update_instances.append(n)
@@ -606,6 +625,12 @@ class CsvFig2(CsvUTI): # without delay
                  ):
         self.title = ['Trail', 'UE_num', 'Aver_Velocity(m/s)', 'MS-ATCNN w/wo delay', 'ATCNN@AverUTI w/wo delay', 'GT@AverUTI w/o delay', 'GT@AverUTI with delay', 'SSS@AverUTI w/wo delay', 'Runtime']
         self.data = []
+        
+class CsvFig3(CsvUTI): # without delay
+    def __init__(self,
+                 ):
+        self.title = ['Trail', 'UE_num', 'Aver_Velocity(m/s)', 'MS-ATCNN Thr', 'RNN-ATCNN Thr', 'Runtime']
+        self.data = []
 
 def UTI_fitting_function(UTI, Ideal_thr_aver, Delay_Thr_aver, gap_target, order):
     # polynomial order
@@ -699,15 +724,24 @@ def mobility_trace_hotspot(UE_num, x_length, y_length, target_velocity, conditio
 
 
 
-def mobility_trace(UE_num, x_length, y_length, Velocity, dis, total_time):
+def mobility_trace(UE_num, x_length, y_length, Velocity, total_time, mode):
     ############ generate trace
     time_index = 0
     recorded_trace = []
     
     waypoints_num = int(total_time/0.01 + 1)
     
-    for i in range(len(Velocity)):
-        rw_target = random_walk(1, dimensions=(x_length, y_length), velocity=(Velocity[i]), distance=dis)
+    for i in range(UE_num):
+        if mode == 'RandomWalk': # constant velocity and change direction for every distance
+            rw_target = random_walk(1, dimensions=(x_length, y_length), velocity = Velocity[i], distance=20)
+        elif mode == 'RWP':  # varying velocity and change direction for every point
+            rw_target = random_waypoint(1, dimensions=(x_length, y_length), velocity = (Velocity[i], Velocity[i]))
+        elif mode == 'GaussMarkov': # average velocity and change direction randomly
+            rw_target = gauss_markov(1, dimensions=(x_length, y_length), velocity_mean = Velocity[i], alpha=0.8, variance=0.01)
+            # 0.02 m/s = 2 m/s for every 10ms
+        else:
+            pass
+        
         trace = []
         for positions in rw_target:
             if time_index == waypoints_num: # 101 points for simulating 10 seconds with time interval of 100ms
@@ -799,12 +833,13 @@ def trace_plot(net, n, fig_num, mode, UTI_update_instances, LB_update_instances)
     # plt.show()  
     plt.close()          
 
-def gif_plt(png_num, LB_mode, trail_time):
-    images = []
-    for k in range(png_num):
-        filename = './Plots/Trace_gif_%s/frame%s.png'%(LB_mode, k+1) 
-        images.append(imageio.imread(filename))
-    imageio.mimwrite('./Plots/Trace_gif_%s/%s_trace%s.gif'%(LB_mode, LB_mode, trail_time), images, duration = 200, loop = 1)
+
+# def gif_plt(png_num, LB_mode, trail_time):
+#     images = []
+#     for k in range(png_num):
+#         filename = './Plots/Trace_gif_%s/frame%s.png'%(LB_mode, k+1) 
+#         images.append(imageio.imread(filename))
+#     imageio.mimwrite('./Plots/Trace_gif_%s/%s_trace%s.gif'%(LB_mode, LB_mode, trail_time), images, duration = 200, loop = 1)
     
 
 def call_function(net, time_index, X_iu_old, UE_index, mode=None):
@@ -853,14 +888,48 @@ def call_function(net, time_index, X_iu_old, UE_index, mode=None):
     v1 = [(tar_position_new[0]-tar_position[0]), (tar_position_new[1]-tar_position[1])]
     v2 = [(AP_position[0]-tar_position[0]), (AP_position[1]-tar_position[1])]
     theta = angle2(v1, v2)
-    R_tar = net.R_requirement[UE_index]
-    Velocity_UE = net.Velocity[UE_index]
+    # Velocity_UE = net.Velocity[UE_index]
+    Velocity_UE = distance(tar_position, tar_position_new)
 
-    input_now = [[(SNR-min_tar_SNR)/(max_tar_SNR-min_tar_SNR), theta/math.pi, R_tar/500, Velocity_UE/0.1]] # normalization 
+    input_now = [[(SNR-min_tar_SNR)/(max_tar_SNR-min_tar_SNR), theta/math.pi, Velocity_UE/0.1]] # normalization 
 
-    input_now = np.array(input_now)
-    pre_output = loaded_model.predict(input_now).tolist()
+    input_now = torch.tensor(input_now, dtype=torch.float32)
+    pre_output = loaded_model(input_now).tolist()
     predicted_UTI = pre_output[0][0]*2 # normalization
     predicted_UTI = np.clip([predicted_UTI], 0.01, 2).tolist()
 
+    return predicted_UTI[0]
+
+def call_function_RNN(net, time_index, X_iu_old, UE_index, h0, RNN_trace, mode=None):
+    
+    max_tar_SNR =  65.32826969
+    min_tar_SNR = 5.191195
+    loaded_model = net.loaded_model_RNN
+    window_size = 10
+    if time_index < window_size:
+        input_now = RNN_trace[UE_index, 0:window_size, :]
+    else:
+        input_now = RNN_trace[UE_index, time_index-window_size:time_index, :]
+    input_now = input_now.view(1, window_size, 3)
+    input_now[:, :, 0] = (input_now[:, :, 0] - min_tar_SNR)/(max_tar_SNR-min_tar_SNR)
+    input_now[:, :, 1] = input_now[:, :, 1]/math.pi
+    input_now[:, :, 2] = input_now[:, :, 2]/10
+    
+    pre_output, h0 = loaded_model(input_now, h0)
+    
+    predicted_UTI = pre_output[0][0]*2 # normalization
+    predicted_UTI = np.clip([predicted_UTI.tolist()], 0.01, 2).tolist()
+
+    return predicted_UTI[0], h0
+
+def call_function_LR(net, time_index, X_iu_old, UE_index, mode=None):
+    # linear regression model for UTI
+    Velocity_UE = np.array(net.Velocity[UE_index]).tolist()
+    
+    velocity = np.array([[0], [10]]) # unit: m/s
+    UTI = np.array([[2], [0]]) # unit: s
+    LR_model = LinearRegression()
+    LR_model.fit(velocity, UTI)
+    predicted_UTI = LR_model.predict(np.array([[Velocity_UE*100]]))
+    np.clip([predicted_UTI], 0.01, 2).tolist()
     return predicted_UTI[0]

@@ -1,0 +1,15 @@
+{
+    "exp_name": "Description: RNN-based UTI regression task in MS-ATCNN",
+    "input_dim": 3,
+    "hidden_dim": 32,
+    "output_dim": 1,
+    "layer_num": 3,
+    "batch_size": 100,
+    "seq_size": 10,
+    "test_freq": 10,
+    "epoch_num": 301,
+    "lr": 0.0001,
+    "dropout": 0.5,
+    "model_name": "RNN",
+    "folder_to_save_files": "result/temporal_UTI/2024-07-04-10-22-18-PM-RNN"
+}
